@@ -1,19 +1,21 @@
 const noFound = 'Auto: Route No Found';
-const whiteListedUser = ['dependabot[bot]', 'pull[bot]']; // dependabot and downstream PR requested by pull[bot]
+const allowedUser = new Set(['dependabot[bot]', 'pull[bot]']); // dependabot and downstream PR requested by pull[bot]
 
 module.exports = async ({ github, context, core }, body, number, sender) => {
     core.debug(`sender: ${sender}`);
     core.debug(`body: ${body}`);
-    const m = body.match(/```routes\s+([\s\S]*?)```/);
+    // Remove all HTML comments before performing the match
+    const bodyNoCmts = body.replaceAll(/<!--[\S\s]*?-->/g, '');
+    const m = bodyNoCmts.match(/```routes\s+([\S\s]*?)```/);
     core.debug(`match: ${m}`);
     let res = null;
 
-    const issue_facts = {
+    const issueFacts = {
         owner: context.repo.owner,
         repo: context.repo.repo,
         issue_number: number,
     };
-    const pr_facts = {
+    const prFacts = {
         owner: context.repo.owner,
         repo: context.repo.repo,
         pull_number: number,
@@ -22,62 +24,70 @@ module.exports = async ({ github, context, core }, body, number, sender) => {
     const addLabels = (labels) =>
         github.rest.issues
             .addLabels({
-                ...issue_facts,
+                ...issueFacts,
                 labels,
             })
-            .catch((e) => {
-                core.warning(e);
+            .catch((error) => {
+                core.warning(error);
             });
 
     const removeLabel = () =>
         github.rest.issues
             .removeLabel({
-                ...issue_facts,
+                ...issueFacts,
                 name: noFound,
             })
-            .catch((e) => {
-                core.warning(e);
+            .catch((error) => {
+                core.warning(error);
             });
 
     const updatePrState = (state) =>
         github.rest.pulls
             .update({
-                ...pr_facts,
+                ...prFacts,
                 state,
             })
-            .catch((e) => {
-                core.warning(e);
+            .catch((error) => {
+                core.warning(error);
             });
 
     const createComment = (body) =>
         github.rest.issues
             .createComment({
-                ...issue_facts,
+                ...issueFacts,
                 body,
             })
-            .catch((e) => {
-                core.warning(e);
+            .catch((error) => {
+                core.warning(error);
             });
 
-    const createFailedComment = () =>
-        createComment(`自动检测失败，请确认 PR 正文部分符合格式规范并重新开启，详情请检查日志
-    Auto Route test failed, please check your PR body format and reopen pull request. Check logs for more details`);
+    const createFailedComment = () => {
+        const logUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+        if (process.env.PULL_REQUEST) {
+            return createComment(`Auto Route Test failed, please check your PR body format and reopen pull request. Check [logs](${logUrl}) for more details.
+        自动路由测试失败，请确认 PR 正文部分符合格式规范并重新开启，详情请检查 [日志](${logUrl})。`);
+        }
+
+        return createComment(`Route Test failed, please check your comment body. Check [logs](${logUrl}) for more details.
+        路由测试失败，请确认评论部分符合格式规范，详情请检查 [日志](${logUrl})。`);
+    };
 
     const pr = await github.rest.issues
         .get({
-            ...issue_facts,
+            ...issueFacts,
         })
-        .catch((e) => {
-            core.warning(e);
+        .catch((error) => {
+            core.warning(error);
         });
     if (pr.pull_request && pr.state === 'closed') {
         await updatePrState('open');
     }
 
-    if (whiteListedUser.includes(sender)) {
-        core.info('PR created by a whitelisted user, passing');
+    if (allowedUser.has(sender)) {
+        core.info('PR created by a allowed user, passing');
         await removeLabel();
-        await addLabels(['Auto: whitelisted']);
+        await addLabels(['Auto: allowed']);
         return;
     } else {
         core.debug('PR created by ' + sender);
@@ -90,7 +100,7 @@ module.exports = async ({ github, context, core }, body, number, sender) => {
         if (res.length && res[0] === 'NOROUTE') {
             core.info('PR stated no route, passing');
             await removeLabel();
-            await addLabels(['Auto: No Route Needed']);
+            await addLabels(['Auto: Route Test Skipped']);
 
             return;
         } else if (res.length && !res.some((e) => e.includes('/:'))) {
@@ -102,9 +112,11 @@ module.exports = async ({ github, context, core }, body, number, sender) => {
 
     core.warning('Seems like no valid routes can be found. Failing.');
 
-    await addLabels([noFound]);
     await createFailedComment();
-    await updatePrState('closed');
+    if (process.env.PULL_REQUEST) {
+        await addLabels([noFound]);
+        await updatePrState('closed');
+    }
 
-    throw Error('Please follow the PR rules: failed to detect route');
+    throw new Error('Please follow the PR rules: failed to detect route');
 };
